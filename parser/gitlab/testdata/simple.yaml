@@ -1,0 +1,7 @@
+---
+stages:
+  - build
+
+build_app:
+  stage: build
+  script: echo "I'm building!"
