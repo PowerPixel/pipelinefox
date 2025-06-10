@@ -49,6 +49,7 @@ func (d dockerPipelineRunner) runJobs(stage string, jobs []parserCommon.Pipeline
 			return output, err
 		}
 		sb.WriteString(output)
+		sb.WriteRune('\n')
 	}
 	return sb.String(), nil
 }
@@ -118,6 +119,7 @@ func (d dockerPipelineRunner) RunPipelineJob(job parserCommon.PipelineJobDescrip
 			}
 			sb.WriteString(s)
 		}
+		sb.WriteRune('\n')
 	}
 	return strings.TrimSpace(sb.String()), nil
 }

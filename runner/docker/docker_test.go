@@ -19,6 +19,32 @@ func TestSimpleDockerPipelineExecution(t *testing.T) {
 			},
 			ExpectedOutput: "hello :)",
 		},
+		{
+			Title:  "it should run 2 simple echo jobs in the same stage",
+			Stages: []string{"build"},
+			Jobs: []parserCommon.PipelineJobDescriptor{
+				parserCommon.NewPipelineJobDescriptor("test", "build", []string{
+					"echo hello :)",
+				}),
+				parserCommon.NewPipelineJobDescriptor("test_2", "build", []string{
+					"echo world ;)",
+				}),
+			},
+			ExpectedOutput: `hello :)
+world ;)`,
+		},
+		{
+			Title:  "it should run a simple job with multiple script lines",
+			Stages: []string{"build"},
+			Jobs: []parserCommon.PipelineJobDescriptor{
+				parserCommon.NewPipelineJobDescriptor("test", "build", []string{
+					"echo hello :)",
+					"echo world ;)",
+				}),
+			},
+			ExpectedOutput: `hello :)
+world ;)`,
+		},
 	}
 
 	for _, testCase := range testCases {
