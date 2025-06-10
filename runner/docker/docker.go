@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
@@ -27,34 +28,38 @@ type dockerPipelineRunner struct {
 	cli client.APIClient
 }
 
-func (d dockerPipelineRunner) RunPipeline(pipeline parserCommon.PipelineDescriptor) (string, error) {
-	var sb strings.Builder
+func (d dockerPipelineRunner) RunPipeline(pipeline parserCommon.PipelineDescriptor) (stdout, stderr string, err error) {
+	var stdoutSb, stderrSb strings.Builder
 
 	for stage, jobs := range pipeline.GetStages() {
-		res, err := d.runJobs(stage, jobs)
+		stdout, stderr, err := d.runJobs(stage, jobs)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
-		sb.WriteString(strings.TrimSpace(res))
+		stdoutSb.WriteString(strings.TrimSpace(stdout))
+		stderrSb.WriteString(strings.TrimSpace(stderr))
 	}
-	return sb.String(), nil
+	return stdoutSb.String(), stderrSb.String(), nil
 }
 
-func (d dockerPipelineRunner) runJobs(stage string, jobs []parserCommon.PipelineJobDescriptor) (string, error) {
-	var sb strings.Builder
+func (d dockerPipelineRunner) runJobs(stage string, jobs []parserCommon.PipelineJobDescriptor) (stdout, stderr string, err error) {
+	var stdoutSb, stderrSb strings.Builder
 	fmt.Printf("Running stage %s\n", stage)
 	for _, job := range jobs {
-		output, err := d.RunPipelineJob(job)
+		stdout, stderr, err := d.RunPipelineJob(job)
 		if err != nil {
-			return output, err
+			return stdout, stderr, err
 		}
-		sb.WriteString(output)
-		sb.WriteRune('\n')
+		stdoutSb.WriteString(stdout)
+		stdoutSb.WriteRune('\n')
+
+		stderrSb.WriteString(stderr)
+		stderrSb.WriteRune('\n')
 	}
-	return sb.String(), nil
+	return stdoutSb.String(), stderrSb.String(), nil
 }
 
-func (d dockerPipelineRunner) RunPipelineJob(job parserCommon.PipelineJobDescriptor) (string, error) {
+func (d dockerPipelineRunner) RunPipelineJob(job parserCommon.PipelineJobDescriptor) (stdout string, stderr string, err error) {
 	ctx := context.Background()
 	image := d.getImageFromJob(job)
 
@@ -64,18 +69,19 @@ func (d dockerPipelineRunner) RunPipelineJob(job parserCommon.PipelineJobDescrip
 
 	createResp, err := d.createContainerForJob(ctx, job, defaultImage)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	defer d.removeContainer(ctx, createResp.ID)
 
 	if err := d.startContainer(ctx, createResp.ID); err != nil {
-		return "", err
+		return "", "", err
 	}
 	d.waitForContainer(ctx, createResp.ID)
 
-	var sb strings.Builder
-	sb.Reset()
+	var stdoutSb, stderrSb strings.Builder
+	stdoutSb.Reset()
+	stderrSb.Reset()
 
 	for _, line := range job.GetScript() {
 		execResp, err := d.cli.ContainerExecCreate(ctx, createResp.ID, container.ExecOptions{
@@ -86,7 +92,7 @@ func (d dockerPipelineRunner) RunPipelineJob(job parserCommon.PipelineJobDescrip
 		})
 
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 
 		attachResp, err := d.cli.ContainerExecAttach(ctx, execResp.ID, container.ExecStartOptions{
@@ -94,34 +100,72 @@ func (d dockerPipelineRunner) RunPipelineJob(job parserCommon.PipelineJobDescrip
 		})
 
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		defer attachResp.Close()
 
-		var buf bytes.Buffer
-		bufWriter := bufio.NewWriter(&buf)
-		_, err = stdcopy.StdCopy(bufWriter, bufWriter, attachResp.Reader)
-		bufWriter.Flush()
+		var stdoutBuf, stderrBuf bytes.Buffer
+		stdoutBufWriter := bufio.NewWriter(&stdoutBuf)
+		stderrBufWriter := bufio.NewWriter(&stderrBuf)
+		_, err = stdcopy.StdCopy(stdoutBufWriter, stderrBufWriter, attachResp.Reader)
+		stdoutBufWriter.Flush()
+		stderrBufWriter.Flush()
 
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 
-		stdoutScanner := bufio.NewScanner(&buf)
+		errCh := make(chan error)
+		waitCh := make(chan struct{})
 
-		for stdoutScanner.Scan() {
-			s := strings.TrimSpace(stdoutScanner.Text())
-			if s == "" {
-				continue
-			}
-			if stdoutScanner.Err() != nil {
-				return "", stdoutScanner.Err()
-			}
-			sb.WriteString(s)
+		go func() {
+			var wg sync.WaitGroup
+			wg.Add(2)
+			stdoutScanner := bufio.NewScanner(&stdoutBuf)
+			go func() {
+				defer wg.Done()
+				for stdoutScanner.Scan() {
+					s := strings.TrimSpace(stdoutScanner.Text())
+					if s == "" {
+						continue
+					}
+					if stdoutScanner.Err() != nil {
+						errCh <- stdoutScanner.Err()
+						return
+					}
+					stdoutSb.WriteString(s)
+				}
+				stdoutSb.WriteRune('\n')
+
+			}()
+
+			stderrScanner := bufio.NewScanner(&stderrBuf)
+			go func() {
+				defer wg.Done()
+				for stderrScanner.Scan() {
+					s := strings.TrimSpace(stderrScanner.Text())
+					if s == "" {
+						continue
+					}
+					if stderrScanner.Err() != nil {
+						errCh <- stderrScanner.Err()
+						return
+					}
+					stderrSb.WriteString(s)
+				}
+				stderrSb.WriteRune('\n')
+			}()
+			wg.Wait()
+			close(waitCh)
+		}()
+		select {
+		case <-waitCh:
+		case err := <-errCh:
+			return "", "", err
 		}
-		sb.WriteRune('\n')
+		close(errCh)
 	}
-	return strings.TrimSpace(sb.String()), nil
+	return strings.TrimSpace(stdoutSb.String()), strings.TrimSpace(stderrSb.String()), nil
 }
 
 func (d dockerPipelineRunner) startContainer(ctx context.Context, containerID string) error {

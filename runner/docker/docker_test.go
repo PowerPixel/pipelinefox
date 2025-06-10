@@ -45,6 +45,16 @@ world ;)`,
 			ExpectedOutput: `hello :)
 world ;)`,
 		},
+		{
+			Title:  "it should output string on stderr",
+			Stages: []string{"build"},
+			Jobs: []parserCommon.PipelineJobDescriptor{
+				parserCommon.NewPipelineJobDescriptor("test", "build", []string{
+					"echo error :( >> /dev/stderr",
+				}),
+			},
+			ExpectedErrorOutput: "error :(",
+		},
 	}
 
 	for _, testCase := range testCases {
@@ -53,16 +63,18 @@ world ;)`,
 
 			pipeline := common.CreateNewPipelineDescriptor(t, testCase.Stages, testCase.Jobs)
 
-			output, err := runner.RunPipeline(pipeline)
+			stdout, stderr, err := runner.RunPipeline(pipeline)
 
 			expectNoError(t, err)
-			expectEqualString(t, testCase.ExpectedOutput, output)
+			expectEqualString(t, testCase.ExpectedOutput, stdout)
+			expectEqualString(t, testCase.ExpectedErrorOutput, stderr)
 		})
 	}
 
 }
 
 func expectEqualString(t *testing.T, expected, actual string) {
+	t.Helper()
 	if expected != actual {
 		t.Fatalf("expected output %s (len %d), got %s (len %d)",
 			expected, len(expected),
