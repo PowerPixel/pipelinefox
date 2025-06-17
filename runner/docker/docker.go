@@ -17,6 +17,7 @@ import (
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	parserCommon "github.com/powerpixel/pipelinefox/parser/common"
 	"github.com/powerpixel/pipelinefox/runner/common"
+	"mvdan.cc/sh/v3/shell"
 )
 
 const (
@@ -84,8 +85,12 @@ func (d dockerPipelineRunner) RunPipelineJob(job parserCommon.PipelineJobDescrip
 	stderrSb.Reset()
 
 	for _, line := range job.GetScript() {
+		parsedShell, err := shell.Fields(line, func(_ string) string { return "" })
+		if err != nil {
+			return "", "", err
+		}
 		execResp, err := d.cli.ContainerExecCreate(ctx, createResp.ID, container.ExecOptions{
-			Cmd:          strings.Fields(line),
+			Cmd:          parsedShell,
 			AttachStdout: true,
 			AttachStderr: true,
 			Tty:          false,

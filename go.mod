@@ -8,7 +8,7 @@ require (
 	github.com/docker/docker v28.1.1+incompatible
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/spf13/cobra v1.8.1
-	github.com/wlynxg/chardet v1.0.0
+	mvdan.cc/sh/v3 v3.11.0
 	sigs.k8s.io/yaml v1.4.0
 )
 
@@ -37,8 +37,6 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.36.0 // indirect
 	go.opentelemetry.io/otel/metric v1.36.0 // indirect
 	go.opentelemetry.io/otel/trace v1.36.0 // indirect
-	go.uber.org/multierr v1.11.0 // indirect
-	go.uber.org/zap v1.27.0 // indirect
 	golang.org/x/sys v0.33.0 // indirect
 	golang.org/x/time v0.11.0 // indirect
 	gotest.tools/v3 v3.5.2 // indirect

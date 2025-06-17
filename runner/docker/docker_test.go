@@ -14,7 +14,7 @@ func TestSimpleDockerPipelineExecution(t *testing.T) {
 			Stages: []string{"build"},
 			Jobs: []parserCommon.PipelineJobDescriptor{
 				parserCommon.NewPipelineJobDescriptor("test", "build", []string{
-					"echo hello :)",
+					"echo \"hello :)\"",
 				}),
 			},
 			ExpectedOutput: "hello :)",
@@ -24,10 +24,10 @@ func TestSimpleDockerPipelineExecution(t *testing.T) {
 			Stages: []string{"build"},
 			Jobs: []parserCommon.PipelineJobDescriptor{
 				parserCommon.NewPipelineJobDescriptor("test", "build", []string{
-					"echo hello :)",
+					"echo \"hello :)\"",
 				}),
 				parserCommon.NewPipelineJobDescriptor("test_2", "build", []string{
-					"echo world ;)",
+					"echo \"world ;)\"",
 				}),
 			},
 			ExpectedOutput: `hello :)
@@ -38,8 +38,8 @@ world ;)`,
 			Stages: []string{"build"},
 			Jobs: []parserCommon.PipelineJobDescriptor{
 				parserCommon.NewPipelineJobDescriptor("test", "build", []string{
-					"echo hello :)",
-					"echo world ;)",
+					"echo \"hello :)\"",
+					"echo \"world ;)\"",
 				}),
 			},
 			ExpectedOutput: `hello :)
@@ -50,7 +50,7 @@ world ;)`,
 			Stages: []string{"build"},
 			Jobs: []parserCommon.PipelineJobDescriptor{
 				parserCommon.NewPipelineJobDescriptor("test", "build", []string{
-					"echo error :( >> /dev/stderr",
+					"echo \"error :(\" >> /dev/stderr",
 				}),
 			},
 			ExpectedErrorOutput: "error :(",

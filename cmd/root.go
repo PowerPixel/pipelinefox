@@ -47,7 +47,7 @@ var rootCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		output, err := runner.RunPipeline(*pipeline)
+		output, _, err := runner.RunPipeline(*pipeline)
 
 		if err != nil {
 			fmt.Printf("encountered unexpected error when running pipeline : %s", err.Error())
