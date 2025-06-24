@@ -1,12 +1,13 @@
 package docker
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
@@ -17,7 +18,7 @@ import (
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	parserCommon "github.com/powerpixel/pipelinefox/parser/common"
 	"github.com/powerpixel/pipelinefox/runner/common"
-	"mvdan.cc/sh/v3/shell"
+	"github.com/powerpixel/pipelinefox/shell"
 )
 
 const (
@@ -65,112 +66,134 @@ func (d dockerPipelineRunner) RunPipelineJob(job parserCommon.PipelineJobDescrip
 	image := d.getImageFromJob(job)
 
 	if err := d.checkImageExistence(ctx, image); err != nil {
-		d.pullImage(ctx, image)
+		if err := d.pullImage(ctx, image); err != nil {
+			return "", "", fmt.Errorf("failed to pull image %s: %w", image, err)
+		}
 	}
 
-	createResp, err := d.createContainerForJob(ctx, job, defaultImage)
+	createResp, err := d.createContainerForJob(ctx, job, image)
 	if err != nil {
 		return "", "", err
 	}
 
 	defer d.removeContainer(ctx, createResp.ID)
 
-	if err := d.startContainer(ctx, createResp.ID); err != nil {
+	if err = d.startContainer(ctx, createResp.ID); err != nil {
 		return "", "", err
 	}
 	d.waitForContainer(ctx, createResp.ID)
 
-	var stdoutSb, stderrSb strings.Builder
-	stdoutSb.Reset()
-	stderrSb.Reset()
-
-	for _, line := range job.GetScript() {
-		parsedShell, err := shell.Fields(line, func(_ string) string { return "" })
-		if err != nil {
-			return "", "", err
-		}
-		execResp, err := d.cli.ContainerExecCreate(ctx, createResp.ID, container.ExecOptions{
-			Cmd:          parsedShell,
-			AttachStdout: true,
-			AttachStderr: true,
-			Tty:          false,
-		})
-
-		if err != nil {
-			return "", "", err
-		}
-
-		attachResp, err := d.cli.ContainerExecAttach(ctx, execResp.ID, container.ExecStartOptions{
-			Tty: false,
-		})
-
-		if err != nil {
-			return "", "", err
-		}
-		defer attachResp.Close()
-
-		var stdoutBuf, stderrBuf bytes.Buffer
-		stdoutBufWriter := bufio.NewWriter(&stdoutBuf)
-		stderrBufWriter := bufio.NewWriter(&stderrBuf)
-		_, err = stdcopy.StdCopy(stdoutBufWriter, stderrBufWriter, attachResp.Reader)
-		stdoutBufWriter.Flush()
-		stderrBufWriter.Flush()
-
-		if err != nil {
-			return "", "", err
-		}
-
-		errCh := make(chan error)
-		waitCh := make(chan struct{})
-
-		go func() {
-			var wg sync.WaitGroup
-			wg.Add(2)
-			stdoutScanner := bufio.NewScanner(&stdoutBuf)
-			go func() {
-				defer wg.Done()
-				for stdoutScanner.Scan() {
-					s := strings.TrimSpace(stdoutScanner.Text())
-					if s == "" {
-						continue
-					}
-					if stdoutScanner.Err() != nil {
-						errCh <- stdoutScanner.Err()
-						return
-					}
-					stdoutSb.WriteString(s)
-				}
-				stdoutSb.WriteRune('\n')
-
-			}()
-
-			stderrScanner := bufio.NewScanner(&stderrBuf)
-			go func() {
-				defer wg.Done()
-				for stderrScanner.Scan() {
-					s := strings.TrimSpace(stderrScanner.Text())
-					if s == "" {
-						continue
-					}
-					if stderrScanner.Err() != nil {
-						errCh <- stderrScanner.Err()
-						return
-					}
-					stderrSb.WriteString(s)
-				}
-				stderrSb.WriteRune('\n')
-			}()
-			wg.Wait()
-			close(waitCh)
-		}()
-		select {
-		case <-waitCh:
-		case err := <-errCh:
-			return "", "", err
-		}
-		close(errCh)
+	if err != nil {
+		return "", "", err
 	}
+
+	if err := d.injectScriptIntoContainer(ctx, job, createResp.ID); err != nil {
+		return "", "", fmt.Errorf("failed to inject script into container: %w", err)
+	}
+
+	var stdoutSb, stderrSb strings.Builder
+
+	execResp, err := d.cli.ContainerExecCreate(ctx, createResp.ID, container.ExecOptions{
+		Cmd:          []string{"sh", "-c", "/tmp/ppfox-bootstrap.sh"},
+		AttachStdout: true,
+		AttachStderr: true,
+		Tty:          false,
+	})
+
+	if err != nil {
+		return "", "", err
+	}
+
+	attachResp, err := d.cli.ContainerExecAttach(ctx, execResp.ID, container.ExecStartOptions{
+		Tty: false,
+	})
+
+	if err != nil {
+		return "", "", err
+	}
+	defer attachResp.Close()
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	_, err = stdcopy.StdCopy(&stdoutBuf, &stderrBuf, attachResp.Reader)
+	if err != nil {
+		return "", "", err
+	}
+
+	stdoutScanner := bufio.NewScanner(&stdoutBuf)
+	for stdoutScanner.Scan() {
+		line := strings.TrimSpace(stdoutScanner.Text())
+		if line != "" {
+			if stdoutSb.Len() > 0 {
+				stdoutSb.WriteRune('\n')
+			}
+			stdoutSb.WriteString(line)
+		}
+	}
+
+	if err := stdoutScanner.Err(); err != nil {
+		return "", "", err
+	}
+
+	stderrScanner := bufio.NewScanner(&stderrBuf)
+	for stderrScanner.Scan() {
+		line := strings.TrimSpace(stderrScanner.Text())
+		if line != "" {
+			if stderrSb.Len() > 0 {
+				stderrSb.WriteRune('\n')
+			}
+			stderrSb.WriteString(line)
+		}
+	}
+
+	if err := stderrScanner.Err(); err != nil {
+		return "", "", err
+	}
+
 	return strings.TrimSpace(stdoutSb.String()), strings.TrimSpace(stderrSb.String()), nil
+}
+
+func (d dockerPipelineRunner) injectScriptIntoContainer(ctx context.Context, job parserCommon.PipelineJobDescriptor, containerId string) error {
+	var scriptBuffer bytes.Buffer
+	scriptBuffer.Reset()
+
+	err := shell.CreateShellScriptFromCommands(&scriptBuffer, job.GetScript())
+
+	if err != nil {
+		return err
+	}
+
+	payload, err := d.createScriptPayload(ctx, scriptBuffer)
+
+	if err != nil {
+		return err
+	}
+
+	return d.cli.CopyToContainer(ctx, containerId, "/tmp", payload, container.CopyToContainerOptions{})
+}
+
+func (d dockerPipelineRunner) createScriptPayload(ctx context.Context, scriptBuffer bytes.Buffer) (*bytes.Buffer, error) {
+	tarBuffer := new(bytes.Buffer)
+	tarWriter := tar.NewWriter(tarBuffer)
+
+	header := &tar.Header{
+		Name: "ppfox-bootstrap.sh",
+		Mode: 0755,
+		Size: int64(scriptBuffer.Len()),
+	}
+
+	if err := tarWriter.WriteHeader(header); err != nil {
+		return tarBuffer, err
+	}
+
+	if _, err := io.Copy(tarWriter, &scriptBuffer); err != nil {
+		return tarBuffer, err
+	}
+
+	if err := tarWriter.Close(); err != nil {
+		return tarBuffer, err
+	}
+
+	return tarBuffer, nil
 }
 
 func (d dockerPipelineRunner) startContainer(ctx context.Context, containerID string) error {
@@ -226,7 +249,7 @@ func (d dockerPipelineRunner) removeContainer(ctx context.Context, containerId s
 func (d dockerPipelineRunner) waitForContainer(ctx context.Context, id string) {
 	inspectResp, err := d.cli.ContainerInspect(ctx, id)
 	for err != nil && !inspectResp.State.Running {
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 		inspectResp, err = d.cli.ContainerInspect(ctx, id)
 	}
 }
