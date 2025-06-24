@@ -1,21 +1,24 @@
 package shell
 
 import (
+	_ "embed"
 	"io"
-	"path/filepath"
 	"text/template"
 )
 
-const templFile = "templates/sh.tmpl"
+const templFile = "sh"
+
+//go:embed templates/sh.tmpl
+var shTempl string
 
 func CreateShellScriptFromCommands(w io.Writer, script []string) error {
 
-	tmpl, err := template.New(templFile).ParseFiles(templFile)
+	tmpl, err := template.New(templFile).Parse(shTempl)
 	if err != nil {
 		return err
 	}
 
-	err = tmpl.ExecuteTemplate(w, filepath.Base(templFile), script)
+	err = tmpl.ExecuteTemplate(w, templFile, script)
 
 	if err != nil {
 		return err
