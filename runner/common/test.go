@@ -3,15 +3,15 @@ package common
 import (
 	"testing"
 
-	"github.com/powerpixel/pipelinefox/parser/common"
 	parserCommon "github.com/powerpixel/pipelinefox/parser/common"
 )
 
 type RunnerTestCase struct {
-	Title          string
-	Stages         []string
-	Jobs           []common.PipelineJobDescriptor
-	ExpectedOutput string
+	Title               string
+	Stages              []string
+	Jobs                []parserCommon.PipelineJobDescriptor
+	ExpectedOutput      string
+	ExpectedErrorOutput string
 }
 
 func CreateNewPipelineDescriptor(t testing.TB, stages []string, jobs []parserCommon.PipelineJobDescriptor) parserCommon.PipelineDescriptor {

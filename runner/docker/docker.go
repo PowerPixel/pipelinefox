@@ -1,10 +1,12 @@
 package docker
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	parserCommon "github.com/powerpixel/pipelinefox/parser/common"
 	"github.com/powerpixel/pipelinefox/runner/common"
+	"github.com/powerpixel/pipelinefox/shell"
 )
 
 const (
@@ -27,101 +30,170 @@ type dockerPipelineRunner struct {
 	cli client.APIClient
 }
 
-func (d dockerPipelineRunner) RunPipeline(pipeline parserCommon.PipelineDescriptor) (string, error) {
-	var sb strings.Builder
+func (d dockerPipelineRunner) RunPipeline(pipeline parserCommon.PipelineDescriptor) (stdout, stderr string, err error) {
+	var stdoutSb, stderrSb strings.Builder
 
 	for stage, jobs := range pipeline.GetStages() {
-		res, err := d.runJobs(stage, jobs)
+		stdout, stderr, err := d.runJobs(stage, jobs)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
-		sb.WriteString(strings.TrimSpace(res))
+		stdoutSb.WriteString(strings.TrimSpace(stdout))
+		stderrSb.WriteString(strings.TrimSpace(stderr))
 	}
-	return sb.String(), nil
+	return stdoutSb.String(), stderrSb.String(), nil
 }
 
-func (d dockerPipelineRunner) runJobs(stage string, jobs []parserCommon.PipelineJobDescriptor) (string, error) {
-	var sb strings.Builder
+func (d dockerPipelineRunner) runJobs(stage string, jobs []parserCommon.PipelineJobDescriptor) (stdout, stderr string, err error) {
+	var stdoutSb, stderrSb strings.Builder
 	fmt.Printf("Running stage %s\n", stage)
 	for _, job := range jobs {
-		output, err := d.RunPipelineJob(job)
+		stdout, stderr, err := d.RunPipelineJob(job)
 		if err != nil {
-			return output, err
+			return stdout, stderr, err
 		}
-		sb.WriteString(output)
-		sb.WriteRune('\n')
+		stdoutSb.WriteString(stdout)
+		stdoutSb.WriteRune('\n')
+
+		stderrSb.WriteString(stderr)
+		stderrSb.WriteRune('\n')
 	}
-	return sb.String(), nil
+	return stdoutSb.String(), stderrSb.String(), nil
 }
 
-func (d dockerPipelineRunner) RunPipelineJob(job parserCommon.PipelineJobDescriptor) (string, error) {
+func (d dockerPipelineRunner) RunPipelineJob(job parserCommon.PipelineJobDescriptor) (stdout string, stderr string, err error) {
 	ctx := context.Background()
 	image := d.getImageFromJob(job)
 
 	if err := d.checkImageExistence(ctx, image); err != nil {
-		d.pullImage(ctx, image)
+		if err := d.pullImage(ctx, image); err != nil {
+			return "", "", fmt.Errorf("failed to pull image %s: %w", image, err)
+		}
 	}
 
-	createResp, err := d.createContainerForJob(ctx, job, defaultImage)
+	createResp, err := d.createContainerForJob(ctx, job, image)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	defer d.removeContainer(ctx, createResp.ID)
 
-	if err := d.startContainer(ctx, createResp.ID); err != nil {
-		return "", err
+	if err = d.startContainer(ctx, createResp.ID); err != nil {
+		return "", "", err
 	}
 	d.waitForContainer(ctx, createResp.ID)
 
-	var sb strings.Builder
-	sb.Reset()
-
-	for _, line := range job.GetScript() {
-		execResp, err := d.cli.ContainerExecCreate(ctx, createResp.ID, container.ExecOptions{
-			Cmd:          strings.Fields(line),
-			AttachStdout: true,
-			AttachStderr: true,
-			Tty:          false,
-		})
-
-		if err != nil {
-			return "", err
-		}
-
-		attachResp, err := d.cli.ContainerExecAttach(ctx, execResp.ID, container.ExecStartOptions{
-			Tty: false,
-		})
-
-		if err != nil {
-			return "", err
-		}
-		defer attachResp.Close()
-
-		var buf bytes.Buffer
-		bufWriter := bufio.NewWriter(&buf)
-		_, err = stdcopy.StdCopy(bufWriter, bufWriter, attachResp.Reader)
-		bufWriter.Flush()
-
-		if err != nil {
-			return "", err
-		}
-
-		stdoutScanner := bufio.NewScanner(&buf)
-
-		for stdoutScanner.Scan() {
-			s := strings.TrimSpace(stdoutScanner.Text())
-			if s == "" {
-				continue
-			}
-			if stdoutScanner.Err() != nil {
-				return "", stdoutScanner.Err()
-			}
-			sb.WriteString(s)
-		}
-		sb.WriteRune('\n')
+	if err != nil {
+		return "", "", err
 	}
-	return strings.TrimSpace(sb.String()), nil
+
+	if err := d.injectScriptIntoContainer(ctx, job, createResp.ID); err != nil {
+		return "", "", fmt.Errorf("failed to inject script into container: %w", err)
+	}
+
+	var stdoutSb, stderrSb strings.Builder
+
+	execResp, err := d.cli.ContainerExecCreate(ctx, createResp.ID, container.ExecOptions{
+		Cmd:          []string{"sh", "-c", "/tmp/ppfox-bootstrap.sh"},
+		AttachStdout: true,
+		AttachStderr: true,
+		Tty:          false,
+	})
+
+	if err != nil {
+		return "", "", err
+	}
+
+	attachResp, err := d.cli.ContainerExecAttach(ctx, execResp.ID, container.ExecStartOptions{
+		Tty: false,
+	})
+
+	if err != nil {
+		return "", "", err
+	}
+	defer attachResp.Close()
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	_, err = stdcopy.StdCopy(&stdoutBuf, &stderrBuf, attachResp.Reader)
+	if err != nil {
+		return "", "", err
+	}
+
+	stdoutScanner := bufio.NewScanner(&stdoutBuf)
+	for stdoutScanner.Scan() {
+		line := strings.TrimSpace(stdoutScanner.Text())
+		if line != "" {
+			if stdoutSb.Len() > 0 {
+				stdoutSb.WriteRune('\n')
+			}
+			stdoutSb.WriteString(line)
+		}
+	}
+
+	if err := stdoutScanner.Err(); err != nil {
+		return "", "", err
+	}
+
+	stderrScanner := bufio.NewScanner(&stderrBuf)
+	for stderrScanner.Scan() {
+		line := strings.TrimSpace(stderrScanner.Text())
+		if line != "" {
+			if stderrSb.Len() > 0 {
+				stderrSb.WriteRune('\n')
+			}
+			stderrSb.WriteString(line)
+		}
+	}
+
+	if err := stderrScanner.Err(); err != nil {
+		return "", "", err
+	}
+
+	return strings.TrimSpace(stdoutSb.String()), strings.TrimSpace(stderrSb.String()), nil
+}
+
+func (d dockerPipelineRunner) injectScriptIntoContainer(ctx context.Context, job parserCommon.PipelineJobDescriptor, containerId string) error {
+	var scriptBuffer bytes.Buffer
+	scriptBuffer.Reset()
+
+	err := shell.CreateShellScriptFromCommands(&scriptBuffer, job.GetScript())
+
+	if err != nil {
+		return err
+	}
+
+	payload, err := d.createScriptPayload(ctx, scriptBuffer)
+
+	if err != nil {
+		return err
+	}
+
+	return d.cli.CopyToContainer(ctx, containerId, "/tmp", payload, container.CopyToContainerOptions{})
+}
+
+func (d dockerPipelineRunner) createScriptPayload(ctx context.Context, scriptBuffer bytes.Buffer) (*bytes.Buffer, error) {
+	tarBuffer := new(bytes.Buffer)
+	tarWriter := tar.NewWriter(tarBuffer)
+
+	header := &tar.Header{
+		Name: "ppfox-bootstrap.sh",
+		Mode: 0755,
+		Size: int64(scriptBuffer.Len()),
+	}
+
+	if err := tarWriter.WriteHeader(header); err != nil {
+		return tarBuffer, err
+	}
+
+	if _, err := io.Copy(tarWriter, &scriptBuffer); err != nil {
+		return tarBuffer, err
+	}
+
+	if err := tarWriter.Close(); err != nil {
+		return tarBuffer, err
+	}
+
+	return tarBuffer, nil
 }
 
 func (d dockerPipelineRunner) startContainer(ctx context.Context, containerID string) error {
@@ -177,7 +249,7 @@ func (d dockerPipelineRunner) removeContainer(ctx context.Context, containerId s
 func (d dockerPipelineRunner) waitForContainer(ctx context.Context, id string) {
 	inspectResp, err := d.cli.ContainerInspect(ctx, id)
 	for err != nil && !inspectResp.State.Running {
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 		inspectResp, err = d.cli.ContainerInspect(ctx, id)
 	}
 }
