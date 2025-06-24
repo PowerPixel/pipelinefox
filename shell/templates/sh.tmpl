@@ -1,0 +1,6 @@
+#!/bin/sh
+
+set -e {{- /* Quit if any error occurs to any command */ -}}
+{{ range . }}
+{{ . }}
+{{ end }}
