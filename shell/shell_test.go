@@ -1,7 +1,6 @@
 package shell
 
 import (
-	"bufio"
 	"bytes"
 	"strings"
 	"testing"
@@ -28,13 +27,11 @@ func TestSimpleShellScriptCreation(t *testing.T) {
 		},
 	}
 	var outputBuff bytes.Buffer
-	output := bufio.NewWriter(&outputBuff)
 
 	for _, tc := range testCases {
 		outputBuff.Reset()
 		t.Run(tc.title, func(t *testing.T) {
-			err := CreateShellScriptFromCommands(output, tc.shellInput)
-			output.Flush()
+			err := CreateShellScriptFromCommands(&outputBuff, tc.shellInput)
 
 			if err != nil {
 				t.Fatalf("unexpected err: %s", err.Error())
