@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"bytes"
 	"testing"
 
 	parserCommon "github.com/powerpixel/pipelinefox/parser/common"
@@ -17,7 +18,7 @@ func TestSimpleDockerPipelineExecution(t *testing.T) {
 					"echo \"hello :)\"",
 				}),
 			},
-			ExpectedOutput: "hello :)",
+			ExpectedOutput: "hello :)\n",
 		},
 		{
 			Title:  "it should run 2 simple echo jobs in the same stage",
@@ -31,7 +32,8 @@ func TestSimpleDockerPipelineExecution(t *testing.T) {
 				}),
 			},
 			ExpectedOutput: `hello :)
-world ;)`,
+world ;)
+`,
 		},
 		{
 			Title:  "it should run a simple job with multiple script lines",
@@ -43,7 +45,8 @@ world ;)`,
 				}),
 			},
 			ExpectedOutput: `hello :)
-world ;)`,
+world ;)
+`,
 		},
 		{
 			Title:  "it should output string on stderr",
@@ -53,21 +56,22 @@ world ;)`,
 					"echo \"error :(\" >> /dev/stderr",
 				}),
 			},
-			ExpectedErrorOutput: "error :(",
+			ExpectedErrorOutput: "error :(\n",
 		},
 	}
 
 	for _, testCase := range testCases {
 		t.Run(testCase.Title, func(t *testing.T) {
+			stdout, stderr := new(bytes.Buffer), new(bytes.Buffer)
 			runner := createNewDockerRunner(t)
 
 			pipeline := common.CreateNewPipelineDescriptor(t, testCase.Stages, testCase.Jobs)
 
-			stdout, stderr, err := runner.RunPipeline(pipeline)
+			err := runner.RunPipeline(stdout, stderr, pipeline)
 
 			expectNoError(t, err)
-			expectEqualString(t, testCase.ExpectedOutput, stdout)
-			expectEqualString(t, testCase.ExpectedErrorOutput, stderr)
+			expectEqualString(t, testCase.ExpectedOutput, stdout.String())
+			expectEqualString(t, testCase.ExpectedErrorOutput, stderr.String())
 		})
 	}
 
