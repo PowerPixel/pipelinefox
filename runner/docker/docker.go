@@ -15,9 +15,11 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/powerpixel/pipelinefox/logging"
 	parserCommon "github.com/powerpixel/pipelinefox/parser/common"
 	"github.com/powerpixel/pipelinefox/runner/common"
 	"github.com/powerpixel/pipelinefox/shell"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -96,12 +98,46 @@ func (d dockerPipelineRunner) RunPipelineJob(stdout, stderr io.Writer, job parse
 	}
 	defer attachResp.Close()
 
-	_, err = stdcopy.StdCopy(stdout, stderr, attachResp.Reader)
-	if err != nil {
-		return err
-	}
+	stdoutBuf := new(bytes.Buffer)
+	stderrBuf := new(bytes.Buffer)
 
-	return nil
+	g, _ := errgroup.WithContext(ctx)
+
+	g.Go(func() error {
+		_, err = stdcopy.StdCopy(stdoutBuf, stderrBuf, attachResp.Reader)
+
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		scanner := bufio.NewScanner(stdoutBuf)
+		for scanner.Scan() {
+			logging.LogJobOutput(job, scanner.Text(), stdout)
+		}
+
+		if scanner.Err() != nil {
+			return scanner.Err()
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		scanner := bufio.NewScanner(stderrBuf)
+		for scanner.Scan() {
+			logging.LogJobError(job, scanner.Text(), stderr)
+		}
+
+		if scanner.Err() != nil {
+			return scanner.Err()
+		}
+
+		return nil
+	})
+
+	return g.Wait()
 }
 
 func (d dockerPipelineRunner) injectScriptIntoContainer(ctx context.Context, job parserCommon.PipelineJobDescriptor, containerId string) error {
