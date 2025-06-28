@@ -235,7 +235,7 @@ func (d dockerPipelineRunner) getImageFromJob(_ parserCommon.PipelineJobDescript
 }
 
 func NewDockerPipelineRunner() (common.PipelineRunner, error) {
-	cli, err := client.NewClientWithOpts(client.FromEnv)
+	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return nil, err
 	}
