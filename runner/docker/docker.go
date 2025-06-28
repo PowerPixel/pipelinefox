@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
@@ -30,68 +29,52 @@ type dockerPipelineRunner struct {
 	cli client.APIClient
 }
 
-func (d dockerPipelineRunner) RunPipeline(pipeline parserCommon.PipelineDescriptor) (stdout, stderr string, err error) {
-	var stdoutSb, stderrSb strings.Builder
-
+func (d dockerPipelineRunner) RunPipeline(stdout, stderr io.Writer, pipeline parserCommon.PipelineDescriptor) (err error) {
 	for stage, jobs := range pipeline.GetStages() {
-		stdout, stderr, err := d.runJobs(stage, jobs)
+		err := d.runJobs(stdout, stderr, stage, jobs)
 		if err != nil {
-			return "", "", err
+			return err
 		}
-		stdoutSb.WriteString(strings.TrimSpace(stdout))
-		stderrSb.WriteString(strings.TrimSpace(stderr))
 	}
-	return stdoutSb.String(), stderrSb.String(), nil
+	return nil
 }
 
-func (d dockerPipelineRunner) runJobs(stage string, jobs []parserCommon.PipelineJobDescriptor) (stdout, stderr string, err error) {
-	var stdoutSb, stderrSb strings.Builder
+func (d dockerPipelineRunner) runJobs(stdout, stderr io.Writer, stage string, jobs []parserCommon.PipelineJobDescriptor) error {
 	fmt.Printf("Running stage %s\n", stage)
 	for _, job := range jobs {
-		stdout, stderr, err := d.RunPipelineJob(job)
+		err := d.RunPipelineJob(stdout, stderr, job)
 		if err != nil {
-			return stdout, stderr, err
+			return err
 		}
-		stdoutSb.WriteString(stdout)
-		stdoutSb.WriteRune('\n')
-
-		stderrSb.WriteString(stderr)
-		stderrSb.WriteRune('\n')
 	}
-	return stdoutSb.String(), stderrSb.String(), nil
+	return nil
 }
 
-func (d dockerPipelineRunner) RunPipelineJob(job parserCommon.PipelineJobDescriptor) (stdout string, stderr string, err error) {
+func (d dockerPipelineRunner) RunPipelineJob(stdout, stderr io.Writer, job parserCommon.PipelineJobDescriptor) error {
 	ctx := context.Background()
 	image := d.getImageFromJob(job)
 
 	if err := d.checkImageExistence(ctx, image); err != nil {
 		if err := d.pullImage(ctx, image); err != nil {
-			return "", "", fmt.Errorf("failed to pull image %s: %w", image, err)
+			return fmt.Errorf("failed to pull image %s: %w", image, err)
 		}
 	}
 
 	createResp, err := d.createContainerForJob(ctx, job, image)
 	if err != nil {
-		return "", "", err
+		return err
 	}
 
 	defer d.removeContainer(ctx, createResp.ID)
 
 	if err = d.startContainer(ctx, createResp.ID); err != nil {
-		return "", "", err
+		return err
 	}
 	d.waitForContainer(ctx, createResp.ID)
 
-	if err != nil {
-		return "", "", err
+	if err = d.injectScriptIntoContainer(ctx, job, createResp.ID); err != nil {
+		return fmt.Errorf("failed to inject script into container: %w", err)
 	}
-
-	if err := d.injectScriptIntoContainer(ctx, job, createResp.ID); err != nil {
-		return "", "", fmt.Errorf("failed to inject script into container: %w", err)
-	}
-
-	var stdoutSb, stderrSb strings.Builder
 
 	execResp, err := d.cli.ContainerExecCreate(ctx, createResp.ID, container.ExecOptions{
 		Cmd:          []string{"sh", "-c", "/tmp/ppfox-bootstrap.sh"},
@@ -101,7 +84,7 @@ func (d dockerPipelineRunner) RunPipelineJob(job parserCommon.PipelineJobDescrip
 	})
 
 	if err != nil {
-		return "", "", err
+		return err
 	}
 
 	attachResp, err := d.cli.ContainerExecAttach(ctx, execResp.ID, container.ExecStartOptions{
@@ -109,47 +92,16 @@ func (d dockerPipelineRunner) RunPipelineJob(job parserCommon.PipelineJobDescrip
 	})
 
 	if err != nil {
-		return "", "", err
+		return err
 	}
 	defer attachResp.Close()
 
-	var stdoutBuf, stderrBuf bytes.Buffer
-	_, err = stdcopy.StdCopy(&stdoutBuf, &stderrBuf, attachResp.Reader)
+	_, err = stdcopy.StdCopy(stdout, stderr, attachResp.Reader)
 	if err != nil {
-		return "", "", err
+		return err
 	}
 
-	stdoutScanner := bufio.NewScanner(&stdoutBuf)
-	for stdoutScanner.Scan() {
-		line := strings.TrimSpace(stdoutScanner.Text())
-		if line != "" {
-			if stdoutSb.Len() > 0 {
-				stdoutSb.WriteRune('\n')
-			}
-			stdoutSb.WriteString(line)
-		}
-	}
-
-	if err := stdoutScanner.Err(); err != nil {
-		return "", "", err
-	}
-
-	stderrScanner := bufio.NewScanner(&stderrBuf)
-	for stderrScanner.Scan() {
-		line := strings.TrimSpace(stderrScanner.Text())
-		if line != "" {
-			if stderrSb.Len() > 0 {
-				stderrSb.WriteRune('\n')
-			}
-			stderrSb.WriteString(line)
-		}
-	}
-
-	if err := stderrScanner.Err(); err != nil {
-		return "", "", err
-	}
-
-	return strings.TrimSpace(stdoutSb.String()), strings.TrimSpace(stderrSb.String()), nil
+	return nil
 }
 
 func (d dockerPipelineRunner) injectScriptIntoContainer(ctx context.Context, job parserCommon.PipelineJobDescriptor, containerId string) error {
