@@ -98,13 +98,17 @@ func (d dockerPipelineRunner) RunPipelineJob(stdout, stderr io.Writer, job parse
 	}
 	defer attachResp.Close()
 
-	stdoutBuf := new(bytes.Buffer)
-	stderrBuf := new(bytes.Buffer)
+	stdoutReader, stdoutWriter := io.Pipe()
+	stderrReader, stderrWriter := io.Pipe()
 
-	g, _ := errgroup.WithContext(ctx)
+
+	g := errgroup.Group{}
 
 	g.Go(func() error {
-		_, err = stdcopy.StdCopy(stdoutBuf, stderrBuf, attachResp.Reader)
+		defer stdoutWriter.Close()
+		defer stderrWriter.Close()
+
+		_, err = stdcopy.StdCopy(stdoutWriter, stderrWriter, attachResp.Reader)
 
 		if err != nil {
 			return err
@@ -113,9 +117,9 @@ func (d dockerPipelineRunner) RunPipelineJob(stdout, stderr io.Writer, job parse
 	})
 
 	g.Go(func() error {
-		scanner := bufio.NewScanner(stdoutBuf)
+		scanner := bufio.NewScanner(stdoutReader)
 		for scanner.Scan() {
-			logging.LogJobOutput(job, scanner.Text(), stdout)
+			logging.LogJobOutput(job, scanner.Text(), &stdout)
 		}
 
 		if scanner.Err() != nil {
@@ -125,9 +129,9 @@ func (d dockerPipelineRunner) RunPipelineJob(stdout, stderr io.Writer, job parse
 	})
 
 	g.Go(func() error {
-		scanner := bufio.NewScanner(stderrBuf)
+		scanner := bufio.NewScanner(stderrReader)
 		for scanner.Scan() {
-			logging.LogJobError(job, scanner.Text(), stderr)
+			logging.LogJobError(job, scanner.Text(), &stderr)
 		}
 
 		if scanner.Err() != nil {
@@ -141,16 +145,15 @@ func (d dockerPipelineRunner) RunPipelineJob(stdout, stderr io.Writer, job parse
 }
 
 func (d dockerPipelineRunner) injectScriptIntoContainer(ctx context.Context, job parserCommon.PipelineJobDescriptor, containerId string) error {
-	var scriptBuffer bytes.Buffer
-	scriptBuffer.Reset()
+	scriptBuffer := new(bytes.Buffer)
 
-	err := shell.CreateShellScriptFromCommands(&scriptBuffer, job.GetScript())
+	err := shell.CreateShellScriptFromCommands(scriptBuffer, job.GetScript())
 
 	if err != nil {
 		return err
 	}
 
-	payload, err := d.createScriptPayload(ctx, scriptBuffer)
+	payload, err := d.createScriptPayload(ctx, *scriptBuffer)
 
 	if err != nil {
 		return err
