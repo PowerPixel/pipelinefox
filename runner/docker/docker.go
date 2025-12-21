@@ -101,7 +101,6 @@ func (d dockerPipelineRunner) RunPipelineJob(stdout, stderr io.Writer, job parse
 	stdoutReader, stdoutWriter := io.Pipe()
 	stderrReader, stderrWriter := io.Pipe()
 
-
 	g := errgroup.Group{}
 
 	g.Go(func() error {
@@ -119,7 +118,7 @@ func (d dockerPipelineRunner) RunPipelineJob(stdout, stderr io.Writer, job parse
 	g.Go(func() error {
 		scanner := bufio.NewScanner(stdoutReader)
 		for scanner.Scan() {
-			logging.LogJobOutput(job, scanner.Text(), &stdout)
+			logging.LogJobOutput(job, scanner.Text(), stdout)
 		}
 
 		if scanner.Err() != nil {
@@ -131,7 +130,7 @@ func (d dockerPipelineRunner) RunPipelineJob(stdout, stderr io.Writer, job parse
 	g.Go(func() error {
 		scanner := bufio.NewScanner(stderrReader)
 		for scanner.Scan() {
-			logging.LogJobError(job, scanner.Text(), &stderr)
+			logging.LogJobError(job, scanner.Text(), stderr)
 		}
 
 		if scanner.Err() != nil {

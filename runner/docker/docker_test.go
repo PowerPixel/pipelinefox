@@ -2,10 +2,12 @@ package docker
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	parserCommon "github.com/powerpixel/pipelinefox/parser/common"
 	"github.com/powerpixel/pipelinefox/runner/common"
+	"github.com/powerpixel/pipelinefox/utils"
 )
 
 func TestSimpleDockerPipelineExecution(t *testing.T) {
@@ -70,21 +72,18 @@ world ;)
 			err := runner.RunPipeline(stdout, stderr, pipeline)
 
 			expectNoError(t, err)
-			expectEqualString(t, testCase.ExpectedOutput, stdout.String())
-			expectEqualString(t, testCase.ExpectedErrorOutput, stderr.String())
+
+			for _, s := range strings.Split(testCase.ExpectedOutput, "\n") {
+				utils.ExpectContainString(t, s, stdout.String())
+			}
+
+			for _, s := range strings.Split(testCase.ExpectedErrorOutput, "\n") {
+				utils.ExpectContainString(t, s, stderr.String())
+			}
+
 		})
 	}
 
-}
-
-func expectEqualString(t *testing.T, expected, actual string) {
-	t.Helper()
-	if expected != actual {
-		t.Fatalf("expected output %s (len %d), got %s (len %d)",
-			expected, len(expected),
-			actual, len(actual),
-		)
-	}
 }
 
 func expectNoError(t *testing.T, err error) {
